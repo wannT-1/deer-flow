@@ -440,6 +440,189 @@ class TestClassifyCommand:
         assert _classify_command(cmd) == expected, f"Expected {expected!r} for compound cmd: {cmd!r}"
 
 
+class TestHomeDirectoryDeletionSpellings:
+    """Recursive deletion of ``$HOME`` / ``${HOME}`` matches ``~`` (#7029)."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "rm -rf $HOME",
+            "rm -rf $HOME/",
+            "rm -rf $HOME/*",
+            "rm -rf ${HOME}",
+            "rm -rf ${HOME}/",
+            "rm -rf ${HOME}/*",
+            "rm -fr $HOME/",
+            "rm -fr ${HOME}/",
+            'rm -rf "$HOME"',
+            'rm -rf "$HOME/"',
+            'rm -rf "$HOME"/*',
+            'rm -rf "${HOME}"',
+            'rm -rf "${HOME}/"',
+            "rm -rf '$HOME/'",
+            "cd /tmp && rm -rf $HOME/",
+            "rm -rf ${HOME}/ && echo ok",
+            "safe;rm -rf $HOME/",
+        ],
+    )
+    def test_home_variable_deletion_classified_as_block(self, cmd):
+        assert _classify_command(cmd) == "block", f"Expected 'block' for: {cmd!r}"
+
+
+class TestHomeDirectoryStartupFileSpellings:
+    """Redirects into shell startup files match ``$HOME`` the way they match ``~`` (#7029)."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "> $HOME/.bashrc",
+            ">> $HOME/.profile",
+            "> ${HOME}/.zshrc",
+            "> ${HOME}/.bash_profile",
+            ">> ${HOME}/.bashrc",
+            '> "$HOME/.bashrc"',
+            '>> "$HOME/.profile"',
+            '> "${HOME}/.zshrc"',
+            '> "${HOME}/.bash_profile"',
+            "echo hi > $HOME/.bashrc",
+            "printf x >> ${HOME}/.profile",
+            ">> $HOME/.bashrc && echo done",
+            "echo kept > ${HOME}/.bash_profile; true",
+        ],
+    )
+    def test_home_variable_startup_overwrite_classified_as_block(self, cmd):
+        assert _classify_command(cmd) == "block", f"Expected 'block' for: {cmd!r}"
+
+
+class TestHomeDirectorySpellingsBlockExecution:
+    """The variable spellings are a real block, not only an audit label (#7029)."""
+
+    def setup_method(self):
+        self.mw = SandboxAuditMiddleware()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "rm -rf $HOME/",
+            "rm -rf ${HOME}/*",
+            'rm -rf "$HOME/"',
+            "> $HOME/.bashrc",
+            "> ${HOME}/.zshrc",
+            'echo x > "$HOME/.profile"',
+        ],
+    )
+    def test_destructive_home_spellings_do_not_run(self, cmd):
+        request = _make_request(cmd)
+        handler = _make_handler()
+        with patch.object(self.mw, "_write_audit"):
+            result = self.mw.wrap_tool_call(request, handler)
+        assert not handler.called, f"handler should NOT be called for: {cmd!r}"
+        assert isinstance(result, ToolMessage)
+        assert result.status == "error"
+        assert "blocked" in result.content.lower()
+
+
+class TestHomeDirectorySpellingsStayAllowed:
+    """Reads and names that only resemble HOME stay allowed (#7029)."""
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "echo $HOME",
+            "echo ${HOME}",
+            'echo "$HOME"',
+            "ls $HOME",
+            "ls $HOME/",
+            "ls $HOME/Documents",
+            "ls ${HOME}/Documents",
+            "cat $HOME/.bashrc",
+            "cat ${HOME}/.bashrc",
+            'cat "$HOME/.bashrc"',
+            "cat $HOME/.bashrc > /tmp/bashrc.copy",
+            "rm -rf $HOMELESS",
+            "rm -rf $HOMELESS/",
+            "rm -rf $MY_HOME/",
+            "rm -rf ${HOME_CACHE}",
+            "rm -rf ${HOME_CACHE}/",
+            "rm -rf $HOME/Documents",
+            "rm -rf ~/Documents",
+            "rm -rf ${HOME}/Documents",
+            "> $HOMELESS/.bashrc",
+            "> ${HOME_CACHE}/.bashrc",
+            "> $MY_HOME/.profile",
+        ],
+    )
+    def test_reads_and_lookalikes_classified_as_pass(self, cmd):
+        assert _classify_command(cmd) == "pass", f"Expected 'pass' for: {cmd!r}"
+
+
+class TestLowercaseHomeVariableGap:
+    """``$home`` / ``${home}`` stay a known gap beside ``${HOME:-/tmp}``.
+
+    Bash treats those names as different variables from ``$HOME``. An unset
+    ``$home`` lets ``rm -rf $home/*`` expand to ``rm -rf /*``, and the
+    case-sensitive pattern still classifies that as pass. Uppercase spellings
+    stay blocked.
+    """
+
+    @pytest.mark.parametrize(
+        ("cmd", "expected"),
+        [
+            ("rm -rf $home", "pass"),
+            ("rm -rf $home/", "pass"),
+            ("rm -rf $home/*", "pass"),
+            ("rm -rf ${home}", "pass"),
+            ("rm -rf ${home}/", "pass"),
+            ("rm -rf ${home}/*", "pass"),
+            ("rm -fr $home/", "pass"),
+            ("> $home/.bashrc", "pass"),
+            (">> ${home}/.profile", "pass"),
+            ("> ${home}/.zshrc", "pass"),
+            ("rm -rf $Home/*", "pass"),
+            ("rm -rf ${Home}/*", "pass"),
+            ("rm -rf $HOME", "block"),
+            ("rm -rf $HOME/", "block"),
+            ("rm -rf $HOME/*", "block"),
+            ("rm -rf ${HOME}", "block"),
+            ("rm -rf ${HOME}/", "block"),
+            ("rm -rf ${HOME}/*", "block"),
+            ("> $HOME/.bashrc", "block"),
+            ("> ${HOME}/.zshrc", "block"),
+        ],
+    )
+    def test_lowercase_home_gap_stays_pass_while_uppercase_blocks(self, cmd, expected):
+        assert _classify_command(cmd) == expected, f"Expected {expected!r} for: {cmd!r}"
+
+
+class TestHomeDirectoryReadsStillExecute:
+    """Allowed home spellings must still run the bash tool (#7029)."""
+
+    def setup_method(self):
+        self.mw = SandboxAuditMiddleware()
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "echo $HOME",
+            "ls $HOME",
+            "ls $HOME/Documents",
+            "cat $HOME/.bashrc",
+            "cat ${HOME}/.bashrc",
+            "rm -rf $HOMELESS",
+            "rm -rf $MY_HOME/",
+            "rm -rf ${HOME_CACHE}",
+        ],
+    )
+    def test_allowed_home_spellings_reach_the_handler(self, cmd):
+        request = _make_request(cmd)
+        handler = _make_handler()
+        with patch.object(self.mw, "_write_audit"):
+            result = self.mw.wrap_tool_call(request, handler)
+        assert handler.called, f"handler should be called for: {cmd!r}"
+        assert result == handler.return_value
+        assert result.status != "error"
+
+
 class TestSplitCompoundCommand:
     """Tests for _split_compound_command quote-aware splitting."""
 
@@ -1046,6 +1229,11 @@ class TestBenchmarkSummary:
         "> /usr/bin/python3",
         "> ~/.bashrc",
         ">> ~/.profile",
+        # home directory named with a variable, same targets as the tilde rules
+        "rm -rf $HOME/",
+        "rm -rf ${HOME}/*",
+        "> $HOME/.bashrc",
+        ">> ${HOME}/.profile",
         # new: /proc environ
         "cat /proc/self/environ",
         # new: dynamic linker hijack
@@ -1094,6 +1282,12 @@ class TestBenchmarkSummary:
         'echo "Today is $(date)"',
         "echo `whoami`",
         "mkdir -p src/{components,utils}",
+        # home-directory variable spellings that are not destructive targets
+        "echo $HOME",
+        "cat $HOME/.bashrc",
+        "ls $HOME/Documents",
+        "rm -rf $HOMELESS",
+        "rm -rf ${HOME_CACHE}",
         "backup() { rsync -a src/ | logger & }",  # function pipeline whose target is not the function itself
     ]
 
