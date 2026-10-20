@@ -11,8 +11,9 @@ backward compatibility, but its loader is *tolerant*:
 * a corrupt or partially written summary no longer crashes the agent;
 * a Markdown summary is accepted only through its fenced ```` ```memory-json ````
   block, which is parsed losslessly;
-* when the on-disk file is unreadable (neither valid JSON nor a Markdown
-  summary with a usable fenced block), it is *quarantined* as
+* when the on-disk file is unreadable — it cannot be decoded
+  (``OSError`` / ``UnicodeError``), or it is neither valid JSON nor a
+  Markdown summary with a usable fenced block — it is *quarantined* as
   ``memory.json.corrupt-<timestamp>`` before the loader returns ``None``.
   Quarantining keeps the content recoverable: returning ``None`` alone would
   make the next :meth:`save` rebuild the manifest from scratch (revision
@@ -58,6 +59,11 @@ class MarkdownMemoryStorage(FileMemoryStorage):
             raw = path.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeError) as exc:
             logger.warning("Cannot read memory summary %s: %s", path, exc)
+            # Same contract as the decode/fence path below: quarantine the
+            # unreadable file (best-effort) so the next save cannot silently
+            # overwrite the user's memory with a fresh manifest.
+            # UnicodeError is content-level (the bytes are wrong); OSError is environment-level (the file may be fine), so a healthy summary can land in ``.corrupt-*`` on a transient error.
+            self._quarantine_unreadable(path)
             return None
 
         parsed: dict[str, Any] | None = None

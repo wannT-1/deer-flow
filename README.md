@@ -464,6 +464,11 @@ frontend retain their own environment loading. Values they already export win.
 It does not select `ENV` profiles or isolate databases, storage or tenants.
 See [backend dotenv selection](backend/docs/CONFIGURATION.md#backend-dotenv-selection).
 
+Custom blob storage backends accept `blob_storage.backend: module.Class` or
+`module:Class`, including a single `.py` module importable by the Gateway.
+The selected class must implement `BlobStore`; backend options go under
+`blob_storage.backend_config`. See [blob storage](backend/docs/blob-storage.md).
+
 ### Running the Application
 
 #### Deployment Sizing
@@ -494,7 +499,7 @@ make docker-start   # Start services (auto-detects sandbox mode from config.yaml
 make docker-logs    # View logs
 ```
 
-`make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
+`make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`). Direct Compose users can add `--profile provisioner` to the dev command for the same mode; the default stack does not require Kubernetes.
 
 Docker builds use the upstream `uv` registry by default. The gateway image installs with `uv sync --locked`, and `uv.lock` pins `https://pypi.org/simple`, so `UV_INDEX_URL` has to keep that value: exporting a mirror such as `https://pypi.tuna.tsinghua.edu.cn/simple` fails the build with ``The lockfile at `uv.lock` needs to be updated, but `--locked` was provided`` (reproduce in an already-synced environment with `cd backend && UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync --locked --check`; if the environment itself is stale, `--check` reports that instead for either index, so use `uv lock --check` to see it without syncing). Installing from a mirror requires regenerating the lock or dropping `--locked`, and both change what the image installs, so keep the default index for a checkout you intend to contribute back. `NPM_REGISTRY=https://registry.npmmirror.com` is independent of this: it applies to the frontend image's `pnpm` install and to the gateway image's Lark CLI install (`@larksuite/cli`, which `backend/Dockerfile` installs with npm).
 
@@ -634,7 +639,7 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 
 > Cancelling a model recovery probe, including while it is queued or waiting to retry, lets the next call check whether the provider has recovered. Cancellation does not count as a provider failure or release another call's active recovery probe.
 >
-> Model retries honor valid provider `Retry-After` hints up to 24 hours, including waits longer than the local backoff cap. Malformed, non-finite, or over-limit hints use normal backoff instead. This applies to numeric/date hints in LLM error handling and integer-second hints in Claude's retry path.
+> Model retries honor valid provider `Retry-After` hints up to 24 hours, including waits longer than the local backoff cap. Malformed, non-finite, or over-limit hints use normal backoff instead. This applies to numeric and HTTP-date hints in LLM error handling and Codex's retry path, and integer-second hints in Claude's retry path. Codex prioritizes numeric `retry-after-ms` hints; past HTTP-date hints retry immediately.
 >
 > With lease heartbeat enabled, a transient RunStore renewal error is retried only until the last confirmed lease expires; the stale worker then cancels local execution and suppresses checkpoint, completion-hook, delivery-receipt, and thread-status finalization. A remote tool side effect already in flight may still be outside local cancellation.
 >
@@ -1503,6 +1508,11 @@ Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and revie
 Skill-creator benchmark aggregation uses recorded `timing.json` token counts even
 when `grading.json` already contains the run duration. Recorded zero counts are
 preserved; output character counts remain a legacy proxy only when token data is missing.
+Unreadable, non-UTF-8, malformed, or non-object `timing.json` data emits a warning
+and is treated as missing measurements. Its token and duration fields accept finite,
+non-negative numbers (including zero); invalid fields emit a warning naming the file
+and field and use the existing fallback independently, preserving valid measurements
+and other runs.
 
 `SKILL.md` YAML frontmatter must open and close with `---` on its own line (trailing spaces or tabs are allowed). A line such as `---suffix` is not a closing delimiter.
 
@@ -2114,6 +2124,8 @@ When the agent asks for clarification, the Web UI shows the structured response 
 
 Unsent Web UI composer drafts survive page reloads and switching between conversations within the same browser tab. Drafts are isolated by user, agent, and conversation, include the selected skill and explicit conversation references, and are cleared once a send is accepted. Project documents already attached to the thread also survive reloads; browser-local uploads and quoted message excerpts are not persisted.
 
+If an attachment upload reports `success: false`, the Web UI stops the send even when the HTTP response is 200. The upload error is shown and the composer keeps its draft and attachments for correction or retry. Files already accepted by a partially successful upload remain on the server; this does not roll them back.
+
 The Web UI composer supports `@` references at the cursor or through the `@` button. Search enabled skills, documents in the current project, and other conversations in a grouped picker; selected references appear inline alongside the draft text and can be removed with normal editing. Multiple skills can be selected in one message (up to 16 unique skills); selecting a checked skill again removes it, with each selection checked against the current user registry and agent allowlist. Project files are attached only after ingestion succeeds; conversation references require the `read_conversation` capability and retain its per-run limit. If capability discovery fails, saved conversation references remain intact and sending waits for a successful retry. Polishing preserves complete reference labels when instructions are reordered. The file group also offers local uploads. `/goal`, `/compact`, and legacy `/skill-name` input remain supported.
 
 After picking an inline reference, typing continues immediately after it. Moving the cursor keeps the position you chose, including when editing text beside a reference.
@@ -2397,6 +2409,8 @@ Embedded Python uploads use the same captured content for the saved document and
 将返回的 `next_cursor` 作为下一次调用的 `cursor`，保留相同过滤条件，直到末页不再
 返回游标。目录元数据或调用上下文变化时会明确要求重新枚举；详情见
 [文件上传文档](backend/docs/FILE_UPLOAD.md)。
+
+Native subagent hard timeouts publish `TIMED_OUT` at the execution deadline while cleanup continues under supervision. Durable batch workers wait up to 60 seconds for cleanup before recording the published outcome and applying the configured retry policy. Unfinished executions retain capacity and sandbox leases until teardown finishes; keep work idempotent because retries may overlap late cleanup.
 
 Durable `batch_task` workers use one app-owned plugin snapshot for tool assembly and execution. Recovered tasks adopt the new worker's plugin snapshot after a Gateway restart; plugin objects are never stored in durable task records.
 
@@ -2885,6 +2899,12 @@ DeerMem debounces pending updates independently per conversation, user, and agen
 and `max_wait_seconds` caps debounce deferral from the first pending update
 (default 300 seconds). Activity in another conversation cannot extend that wait.
 Extraction remains serial, so backlog and LLM latency can still delay completion.
+Emergency snapshots of messages removed by compaction remain separate in arrival
+order, so later compactions cannot replace earlier pending snapshots.
+A backlog warning identifies the conversation, user, and agent at 32 pending emergency
+snapshots and each doubling. These snapshots remain admitted beyond `queue_max_depth`
+and stay in memory until processing. Check extraction latency when warnings appear;
+process exit can still lose pending work.
 
 The opt-in [DeerMem scope-isolation benchmark](backend/scripts/benchmark/deermem_scope_isolation/README.md)
 checks semantic safety across facts and summaries, and fact routing across users
@@ -2893,9 +2913,12 @@ and agents. Failed extraction attempts are retryable execution errors, not safet
 For DeerMem, `memory.backend_config.storage_class: markdown` opts into tolerant
 summary reads while keeping JSON writes and the existing UI. A hand-edited
 `memory.json` can contain its JSON object inside a fenced `memory-json` block;
-embedded backticks and later fenced notes are supported. Unparseable summary
-text is moved to `memory.json.corrupt-<timestamp>` for recovery before rebuilding.
+embedded backticks and later fenced notes are supported. Summary text that
+cannot be parsed or decoded is moved to `memory.json.corrupt-<timestamp>` for
+recovery before rebuilding.
 `storage_path` must point to the data root directory, not an existing JSON file.
+Hand-edited DeerMem summaries and fact Markdown files may have a leading UTF-8
+BOM; reads accept it, while writes remain BOM-free UTF-8.
 
 Gateway shutdown drains memory updates before closing the backend, even when
 shutdown is cancelled. Config reload failures are logged without aborting runtime
