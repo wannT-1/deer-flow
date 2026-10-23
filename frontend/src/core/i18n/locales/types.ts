@@ -36,6 +36,7 @@ export interface Translations {
       | "retrieval"
       | "knowledge"
       | "weknora"
+      | "lightrag"
       | "example",
       { title: string; description: string }
     >;
@@ -432,6 +433,7 @@ export interface Translations {
         autoOff: string;
         noProgress: string;
         tokenCapped: string;
+        loopCapped: string;
         missingEvidence: string;
         runFailed: string;
         needsInputCard: string;
@@ -996,6 +998,7 @@ export interface Translations {
         maxContinuations: string;
         noProgress: string;
         tokenCapped: string;
+        loopCapped: string;
         evaluatorFailed: string;
         noDurableEndOfTurn: string;
         threadChanged: string;
